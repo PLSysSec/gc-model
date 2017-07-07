@@ -54,7 +54,7 @@ writeWords ws = do
   i <- getAllocPtr
   bumpAllocPtr (length ws)
   mem <- gets (^.heapMem)
-  liftIO $ mapM_ (writeArray mem i) ws
+  liftIO $ zipWithM_ (writeArray mem) [i..] ws
   return i
 
 -- given an int index, get its metadata
@@ -73,7 +73,7 @@ metaType :: Word32 -> Proxy x
 metaType = undefined
 
 
---| DATA REPRESENTATION
+-- | DATA REPRESENTATION
 -- right now only consider primitive data that fit into a single word32.
 -- heap looks like this:
 --      [meta | data | meta | data ... ]
