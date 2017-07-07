@@ -40,27 +40,27 @@ data Exn = OutOfMemory
 
 type GC a = ExceptT Exn (StateT Heap IO) a
 
+withRawHeap :: (IOUArray Int Word32 -> IO a) -> GC a
+withRawHeap f = gets heapMem >>= liftIO . f
+
 getAllocPtr :: GC Int
-getAllocPtr = gets (^.heapFree)
+getAllocPtr = gets heapFree
 
 bumpAllocPtr :: Int -> GC ()
 bumpAllocPtr i =
   void $ modify (\h -> h { heapFree = heapFree h + i })
-  --void $ heapFree <+= i
 
 writeWords :: [Word32] -> GC Int
 writeWords ws = do
   i <- getAllocPtr
   bumpAllocPtr (length ws)
-  mem <- gets heapMem
-  liftIO $ zipWithM_ (writeArray mem) [i..] ws
+  withRawHeap $ \h -> zipWithM_ (writeArray h) [i..] ws
   return i
 
 -- given an int index, get its metadata
 getType :: Int -> GC (Proxy x)
 getType i = do
-  heap <- gets heapMem
-  meta <- liftIO . flip readArray i
+  meta <- withRawHeap $ \h -> readArray h i
   checkIsMeta meta
   return $ metaType meta
 
