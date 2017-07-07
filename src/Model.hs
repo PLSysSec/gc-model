@@ -36,9 +36,12 @@ data Heap = Heap
 
 makeLenses ''Heap
 
-data OOM = OutOfMemory
+-- TODO: throw memory exhaustion exception
+-- GC = catch exception, run gc, etc
+data Exn = OutOfMemory
+         | InvalidPtr -- if not tagged as a metadata field
 
-type GC a = ExceptT OOM (StateT Heap IO) a
+type GC a = ExceptT Exn (StateT Heap IO) a
 
 getAllocPtr :: GC Int
 getAllocPtr = gets (^.heapFree)
@@ -54,10 +57,35 @@ writeWords ws = do
   liftIO $ mapM_ (writeArray mem i) ws
   return i
 
+-- given an int index, get its metadata
 getType :: Int -> GC (Proxy x)
 getType i = do
+  heap <- gets (^.heapMem)
+  meta <- liftIO . flip readArray i
+  checkIsMeta meta
+  return $ metaType meta
 
--- getType :: Int -> GC Proxy
+-- TODO
+checkIsMeta :: Word32 -> GC ()
+checkIsMeta w = throwError InvalidPtr
+
+metaType :: Word32 -> Proxy x
+metaType = undefined
+
+
+--| DATA REPRESENTATION
+-- right now only consider primitive data that fit into a single word32.
+-- heap looks like this:
+--      [meta | data | meta | data ... ]
+--
+-- tagging: use LSB for tagging:
+-- 0 for metadata
+-- 1 for data
+--
+-- NB: as this gets fleshed out it will be time to switch to a better repr like
+-- the GHC representation: https://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects
+-- or the Scheme one: http://www.more-magic.net/posts/internals-data-representation.html
+
 
 -- proxy for metadata serialisation
 data Meta
@@ -67,12 +95,13 @@ data Value x where
   Int  :: Word32 -> Value (Proxy Int)
   Chr  :: Word32 -> Value (Proxy Char)
   Bool :: Word32 -> Value (Proxy Bool)
-  Meta :: Word32 -> Value (Proxy Meta)
+--  Meta :: Word32 -> Value (Proxy Meta)
   Pair :: Value a -> Value b -> Value x
 
 -- serialisation
 class Repr x where
   repr :: x -> [Word32]
+
   meta :: x -> Word32
 
 -- TODO
@@ -84,8 +113,9 @@ instance Repr (Value x) where
 serialise :: Repr a => a -> [Word32]
 serialise x = meta x : repr x
 
+{-@ reify :: {b:[Word32]| len b >= 2} -> Proxy x -> Value x @-}
 reify :: [Word32] -> Proxy x -> Value x
-reify bs _ = undefined
+reify (m:bs) _ = undefined
 
 alloc :: Repr a => a -> GC a
 alloc x = do
