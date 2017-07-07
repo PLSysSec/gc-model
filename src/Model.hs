@@ -2,8 +2,7 @@
 ExistentialQuantification,
 GADTs,
 DataKinds,KindSignatures,TypeFamilies, RankNTypes,
-ConstraintKinds, UndecidableInstances,TypeSynonymInstances, FlexibleInstances,
-TemplateHaskell
+ConstraintKinds, UndecidableInstances,TypeSynonymInstances, FlexibleInstances
 #-}
 
 -- prototype implementation of rc-gc
@@ -23,18 +22,16 @@ import Data.Array.IO
 import Data.Word
 import Data.Proxy
 import Data.Char
-import Control.Lens.TH (makeLenses)
-import Control.Lens.Operators ((^.), (%~), (<+=), (<%=))
 import Data.Binary
 
+-- other structures to consider:
+--   rose tree of IORefs / Ptr Word32
 
 data Heap = Heap
-  { _heapMem :: IOUArray Int Word32 -- this is NOT block structured!!!
-  , _heapBounds :: (Int,Int)     -- array bounds
-  , _heapFree :: Int             -- next free index
+  { heapMem :: IOUArray Int Word32 -- this is NOT block structured!!!
+  , heapBounds :: (Int,Int)     -- array bounds
+  , heapFree :: Int             -- next free index
   }
-
-makeLenses ''Heap
 
 -- TODO: throw memory exhaustion exception
 -- GC = catch exception, run gc, etc
@@ -47,20 +44,22 @@ getAllocPtr :: GC Int
 getAllocPtr = gets (^.heapFree)
 
 bumpAllocPtr :: Int -> GC ()
-bumpAllocPtr i = void $ heapFree <+= i
+bumpAllocPtr i =
+  void $ modify (\h -> h { heapFree = heapFree h + i })
+  --void $ heapFree <+= i
 
 writeWords :: [Word32] -> GC Int
 writeWords ws = do
   i <- getAllocPtr
   bumpAllocPtr (length ws)
-  mem <- gets (^.heapMem)
+  mem <- gets heapMem
   liftIO $ zipWithM_ (writeArray mem) [i..] ws
   return i
 
 -- given an int index, get its metadata
 getType :: Int -> GC (Proxy x)
 getType i = do
-  heap <- gets (^.heapMem)
+  heap <- gets heapMem
   meta <- liftIO . flip readArray i
   checkIsMeta meta
   return $ metaType meta

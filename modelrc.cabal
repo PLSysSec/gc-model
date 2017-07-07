@@ -18,7 +18,6 @@ library
   exposed-modules:     Model
   build-depends:       base >= 4.7 && < 5
                      , array >=0.5.1.1
-                     , lens
                      , mtl
                      , binary
   default-language:    Haskell2010
