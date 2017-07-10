@@ -1,56 +1,59 @@
 {-# LANGUAGE
-ExistentialQuantification,
-GADTs,
-DataKinds,KindSignatures,TypeFamilies, RankNTypes,
-ConstraintKinds, UndecidableInstances,TypeSynonymInstances, FlexibleInstances
+ExistentialQuantification, GADTs,
+DataKinds,KindSignatures,TypeFamilies, RankNTypes,ConstraintKinds,
+UndecidableInstances,TypeSynonymInstances, FlexibleInstances,
+Strict
 #-}
 
 -- prototype implementation of rc-gc
 module Model where
 
-import Control.Monad.Trans
+import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State.Lazy
-import Control.Monad
-import System.IO
+import Control.Monad.Trans
+import Data.Array.IO
+import Data.Array.MArray
+import Data.Binary
+import Data.Bits
+import Data.Char
 import Data.IORef
+import Data.Proxy
+import Data.Word
+import Foreign.Marshal.Alloc
 import Foreign.Ptr
 import Foreign.Storable
-import Foreign.Marshal.Alloc
-import Data.Array.MArray
-import Data.Array.IO
-import Data.Word
-import Data.Proxy
-import Data.Char
-import Data.Binary
+import System.IO
 
 -- other structures to consider:
 --   rose tree of IORefs / Ptr Word32
 
-data Heap = Heap
-  { heapMem :: IOUArray Int Word32 -- this is NOT block structured!!!
-  , heapBounds :: (Int,Int)     -- array bounds
-  , heapFree :: Int             -- next free index
+data Heap m = Heap
+  { heapMem :: MutableByteArray (PrimState m) -- this is NOT block structured!!!
+  -- , heapBounds :: (Int,Int)     -- array bounds
+  -- , heapFree :: Int             -- next free index
   }
+
+data TypeTag = Pointer | Int
+
 
 -- TODO: throw memory exhaustion exception
 -- GC = catch exception, run gc, etc
 data Exn = OutOfMemory
          | InvalidPtr -- if not tagged as a metadata field
 
-type GC a = ExceptT Exn (StateT Heap IO) a
+type RTS a = ExceptT Exn (StateT Heap IO) a
 
-withRawHeap :: (IOUArray Int Word32 -> IO a) -> GC a
+withRawHeap :: (IOUArray Int Word32 -> IO a) -> RTS a
 withRawHeap f = gets heapMem >>= liftIO . f
 
-getAllocPtr :: GC Int
+getAllocPtr :: RTS Int
 getAllocPtr = gets heapFree
 
-bumpAllocPtr :: Int -> GC ()
-bumpAllocPtr i =
-  void $ modify (\h -> h { heapFree = heapFree h + i })
+bumpAllocPtr :: Int -> RTS ()
+bumpAllocPtr i = void $ modify (\h -> h {heapFree = heapFree h + i})
 
-writeWords :: [Word32] -> GC Int
+writeWords :: [Word32] -> RTS Int
 writeWords ws = do
   i <- getAllocPtr
   bumpAllocPtr (length ws)
@@ -58,68 +61,81 @@ writeWords ws = do
   return i
 
 -- given an int index, get its metadata
-getType :: Int -> GC (Proxy x)
+getType :: Int -> RTS (Proxy x)
 getType i = do
   meta <- withRawHeap $ \h -> readArray h i
   checkIsMeta meta
   return $ metaType meta
 
 -- TODO
-checkIsMeta :: Word32 -> GC ()
+checkIsMeta :: Word32 -> RTS ()
 checkIsMeta w = throwError InvalidPtr
 
 metaType :: Word32 -> Proxy x
 metaType = undefined
 
 
--- | DATA REPRESENTATION
--- right now only consider primitive data that fit into a single word32.
--- heap looks like this:
---      [meta | data | meta | data ... ]
---
--- tagging: use LSB for tagging:
--- 0 for metadata
--- 1 for data
---
--- NB: as this gets fleshed out it will be time to switch to a better repr like
--- the GHC representation: https://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects
--- or the Scheme one: http://www.more-magic.net/posts/internals-data-representation.html
+alloc ::
+
+-- -- | DATA REPRESENTATION
+-- -- right now only consider primitive data that fit into a single word32.
+-- -- heap looks like this:
+-- --      [meta | data | meta | data ... ]
+-- --
+-- -- tagging: use LSB for tagging:
+-- -- 0 for metadata
+-- -- 1 for data
+-- --
+-- -- NB: as this gets fleshed out it will be time to switch to a better repr like
+-- -- the GHC representation: https://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects
+-- -- or the Scheme one: http://www.more-magic.net/posts/internals-data-representation.html
 
 
--- proxy for metadata serialisation
-data Meta
 
--- representable data
-data Value x where
-  Int  :: Word32 -> Value (Proxy Int)
-  Chr  :: Word32 -> Value (Proxy Char)
-  Bool :: Word32 -> Value (Proxy Bool)
---  Meta :: Word32 -> Value (Proxy Meta)
-  Pair :: Value a -> Value b -> Value x
 
--- serialisation
-class Repr x where
-  repr :: x -> [Word32]
+-- -- proxy for metadata serialisation
+-- data Meta
 
-  meta :: x -> Word32
+-- -- representable data
+-- newtype Var v a = Var v
 
--- TODO
-instance Repr (Value x) where
-  repr (Int i) = [0]
+-- data Value v a where
+--   Fun :: (Var v a -> Value v b) -> Value v b
+--   Let :: Var v a -> Value v a -> Value v b -> Value v b
+--   Bool :: Bool -> Value v Bool
+--   Int :: Int -> Value v Int
 
-  meta (Int i) = 0
 
-serialise :: Repr a => a -> [Word32]
-serialise x = meta x : repr x
+-- --  Int  :: Int -> Value
+-- --  Chr  ::  -> Value
+-- --  Bool :: Word32 -> Value
 
-{-@ reify :: {b:[Word32]| len b >= 2} -> Proxy x -> Value x @-}
-reify :: [Word32] -> Proxy x -> Value x
-reify (m:bs) _ = undefined
+-- --  Meta :: Word32 -> Value (Proxy Meta)
+-- --  Pair :: Value a -> Value b -> Value x
 
-alloc :: Repr a => a -> GC a
-alloc x = do
-  let r = meta x : repr x
-  return x
+-- -- serialisation
+-- class Repr x where
+--   repr :: x -> [Word32]
+
+--   meta :: x -> Word32
+
+-- -- TODO
+-- instance Repr (Value x) where
+--   repr (Int i) = [0]
+
+--   meta (Int i) = 0
+
+-- serialise :: Repr a => a -> [Word32]
+-- serialise x = meta x : repr x
+
+-- {-@ reify :: {b:[Word32]| len b >= 2} -> Proxy x -> Value x @-}
+-- reify :: [Word32] -> Proxy x -> Value x
+-- reify (m:bs) _ = undefined
+
+-- alloc :: Repr a => a -> GC a
+-- alloc x = do
+--   let r = meta x : repr x
+--   return x
 
 
 -- compile arbitrary haskell progs
