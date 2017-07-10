@@ -25,6 +25,54 @@ import Foreign.Ptr
 import Foreign.Storable
 import System.IO
 
+import Control.Monad.Primitive
+import Data.Primitive.ByteArray
+
+import Numeric
+
+-- fit in word64
+-- top 32 bits is metadata, bottom 32 bits is data
+--   - data can be 16 bit pointer, in which case high-order 16 bits must be 0
+--   - data can be 32 bit unsigned integer
+-- top 16 bits of metadata is forwarding pointer if it exists
+-- bottom 16 bits of metadata is tags:
+--
+-- invariant: 
+
+--data Data      = Int Word32 | Pointer Word16
+data Type = Int | Pointer deriving (Show, Eq)
+data HeapEntry = HeapEntry Word16 -- ^ forwarding pointer
+                           Type   -- ^ type
+                           Bool   -- ^ GC bit
+                           Word32 -- ^ Data
+  deriving (Show, Eq)
+
+
+serialize :: HeapEntry -> Word64
+serialize (HeapEntry f t g d) =  ((shift (fromIntegral f)             48)
+                             .|. (shift (fromIntegral otherMetadata) 32))
+                             .|. fromIntegral data'
+  where data' | t == Int     = d
+              | t == Pointer = d .&. 0xffff
+        otherMetadata :: Word16
+        otherMetadata =  shift (fromIntegral typeRepr) 1
+                     .|. shift (fromIntegral gcRepr)   0
+        typeRepr :: Word16
+        typeRepr | t == Int     = 0
+                 | t == Pointer = 1
+        gcRepr :: Word16
+        gcRepr | g == False = 0
+               | g == True = 1
+deserialize :: Word64 -> HeapEntry
+deserialize w = HeapEntry f t g d
+  where f = fromIntegral $ shift w (-48)
+        t = if w .&. 0x20000 > 0 then Pointer else Int
+        g = if w .&. 0x10000 > 0 then True else False
+        d = fromIntegral $ w .&. 0xffff
+
+p :: (Show a, Integral a) => a -> String
+p = flip showHex ""
+
 -- other structures to consider:
 --   rose tree of IORefs / Ptr Word32
 
@@ -34,7 +82,7 @@ data Heap m = Heap
   -- , heapFree :: Int             -- next free index
   }
 
-data TypeTag = Pointer | Int
+{- data TypeTag = Pointer | Int
 
 
 -- TODO: throw memory exhaustion exception
@@ -75,7 +123,7 @@ metaType :: Word32 -> Proxy x
 metaType = undefined
 
 
-alloc ::
+alloc ::-}
 
 -- -- | DATA REPRESENTATION
 -- -- right now only consider primitive data that fit into a single word32.
