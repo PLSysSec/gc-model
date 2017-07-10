@@ -2,7 +2,7 @@
 ExistentialQuantification, GADTs,
 DataKinds,KindSignatures,TypeFamilies, RankNTypes,ConstraintKinds,
 UndecidableInstances,TypeSynonymInstances, FlexibleInstances,
-Strict
+Strict, TypeApplications
 #-}
 
 -- prototype implementation of rc-gc
@@ -27,7 +27,7 @@ import System.IO
 
 import Control.Monad.Primitive
 import Data.Primitive.ByteArray
-
+import Test.QuickCheck hiding ((.&.))
 import Numeric
 
 -- fit in word64
@@ -37,7 +37,7 @@ import Numeric
 -- top 16 bits of metadata is forwarding pointer if it exists
 -- bottom 16 bits of metadata is tags:
 --
--- invariant: 
+-- invariant:
 
 --data Data      = Int Word32 | Pointer Word16
 data Type = Int | Pointer deriving (Show, Eq)
@@ -66,12 +66,30 @@ serialize (HeapEntry f t g d) =  ((shift (fromIntegral f)             48)
 deserialize :: Word64 -> HeapEntry
 deserialize w = HeapEntry f t g d
   where f = fromIntegral $ shift w (-48)
-        t = if w .&. 0x20000 > 0 then Pointer else Int
-        g = if w .&. 0x10000 > 0 then True else False
-        d = fromIntegral $ w .&. 0xffff
+        t = if w .&. 0x200000000 > 0 then Pointer else Int
+        g = if w .&. 0x100000000 > 0 then True else False
+        d = fromIntegral $ w .&. (case t of
+                                    Int -> 0xffffffff
+                                    Pointer -> 0xffff)
 
 p :: (Show a, Integral a) => a -> String
 p = flip showHex ""
+
+instance Arbitrary Type where
+  arbitrary = elements [Int, Pointer]
+
+instance Arbitrary HeapEntry where
+  arbitrary = do
+    f <- arbitrary
+    t <- arbitrary
+    g <- arbitrary
+    d <- case t of
+      Int -> arbitrary @Word32
+      Pointer -> fromIntegral <$> arbitrary @Word16
+    return $ (HeapEntry f t g d)
+
+prop_serialize_bidirectional :: HeapEntry -> Bool
+prop_serialize_bidirectional h = h == (deserialize . serialize) h
 
 -- other structures to consider:
 --   rose tree of IORefs / Ptr Word32
