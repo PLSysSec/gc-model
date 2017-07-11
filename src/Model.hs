@@ -1,347 +1,139 @@
-{-# LANGUAGE
-ExistentialQuantification, GADTs,
-DataKinds,KindSignatures,TypeFamilies, RankNTypes,ConstraintKinds,
-UndecidableInstances,TypeSynonymInstances, FlexibleInstances,
-Strict, TypeApplications
-#-}
-
--- prototype implementation of rc-gc
-module Model where
-
-import Control.Monad
-import Control.Monad.Except
-import Control.Monad.State.Lazy
-import Control.Monad.Trans
-import Control.Concurrent
-import Data.Array.IO
-import Data.Array.MArray
---import Data.Binary hiding (get, put)
-import Data.Bits
-import Data.Char
-import Data.IORef
-import Data.Proxy
-import Data.Word
-import Foreign.Marshal.Alloc
-import Foreign.Ptr
-import Foreign.Storable
-import System.IO
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 import Control.Monad.Primitive
 import Data.Primitive.ByteArray
-import Test.QuickCheck hiding ((.&.))
-import Numeric
 
-import Control.Monad.ST
-import Data.Function
+import Data.Word
+import Data.Int
+import Data.Bits
+import Data.Kind
 import Data.List
 import Data.Ord
+import Data.Function
+import Control.Monad.State
 
--- fit in word64
--- top 32 bits is metadata, bottom 32 bits is data
---   - data can be 16 bit pointer, in which case high-order 16 bits must be 0
---   - data can be 32 bit unsigned integer
--- top 16 bits of metadata is forwarding pointer if it exists
--- bottom 16 bits of metadata is tags:
---
--- invariant:
+newtype Ptr = Ptr { getPtr :: Word16 } deriving (Num, Eq, Ord)
 
---data Data      = Int Word32 | Ptr Word16
-data Type = Int | Ptr deriving (Show, Eq)
-data HeapEntry = HeapEntry Word16 -- ^ forwarding pointer
-                           Type   -- ^ type
-                           Bool   -- ^ GC bit
-                           Word32 -- ^ Data
-  deriving (Show, Eq)
+data TermType where
+  T_Int  :: TermType
+  T_Ptr  :: TermType
+  T_Bool :: TermType
+  T_Fun  :: TermType -> TermType -> TermType
+data Exp (a :: TermType) where
+  E_Int   :: Int32      -> Exp 'T_Int
+  E_Ptr   :: Word16     -> Exp 'T_Ptr
+  E_Bool  :: Bool       -> Exp 'T_Bool
+  E_Fun   :: (Exp a -> Exp b) -> Exp ('T_Fun a b)
 
+  E_Plus  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
+  E_Mult  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
+  E_Eq    :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Bool
+  E_If    :: Exp 'T_Bool -> Exp a -> Exp a -> Exp a
+  E_Fix   :: Exp ('T_Fun a a) -> Exp a
+  E_App   :: Exp ('T_Fun a b) -> Exp a -> Exp b
 
-serialize :: HeapEntry -> Word64
-serialize (HeapEntry f t g d) =  ((shift (fromIntegral f)             48)
-                             .|. (shift (fromIntegral otherMetadata) 32))
-                             .|. fromIntegral data'
-  where data' | t == Int     = d
-              | t == Ptr = d .&. 0xffff
-        otherMetadata :: Word16
-        otherMetadata =  shift (fromIntegral typeRepr) 1
-                     .|. shift (fromIntegral gcRepr)   0
-        typeRepr :: Word16
-        typeRepr | t == Int     = 0
-                 | t == Ptr = 1
-        gcRepr :: Word16
-        gcRepr | g == False = 0
-               | g == True = 1
-deserialize :: Word64 -> HeapEntry
-deserialize w = HeapEntry f t g d
-  where f = fromIntegral $ shift w (-48)
-        t = if w .&. 0x200000000 > 0 then Ptr else Int
-        g = if w .&. 0x100000000 > 0 then True else False
-        d = fromIntegral $ w .&. (case t of
-                                    Int -> 0xffffffff
-                                    Ptr -> 0xffff)
+fact :: Exp ('T_Fun 'T_Int 'T_Int)
+fact = E_Fix $ E_Fun $ \fact -> E_Fun $ \n ->
+  E_If (E_Eq n (E_Int 0))
+       (E_Int 1)
+       (E_Mult (E_App fact (E_Plus n (E_Int (-1)))) n)
 
-p :: (Show a, Integral a) => a -> String
-p = flip showHex ""
+type family HSType (t :: TermType) :: Type where
+  HSType T_Int       = Int32
+  HSType T_Ptr       = Word16
+  HSType T_Bool      = Bool
+  HSType (T_Fun a b) = Exp a -> Exp b
 
-instance Arbitrary Type where
-  arbitrary = elements [Int, Ptr]
+eval_hs :: Exp t -> HSType t
+eval_hs (E_Int i)  = i
+eval_hs (E_Ptr p)  = p
+eval_hs (E_Bool b) = b
+eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
+eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
+eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
+eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
+eval_hs (E_Fun f) = f
+eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
+eval_hs (E_App f a) = eval_hs (eval_hs f a)
 
-instance Arbitrary HeapEntry where
-  arbitrary = do
-    f <- arbitrary
-    t <- arbitrary
-    g <- arbitrary
-    d <- case t of
-      Int -> arbitrary @Word32
-      Ptr -> fromIntegral <$> arbitrary @Word16
-    return $ (HeapEntry f t g d)
+data AnyFunction = forall a b. AnyFunction { applyFunction :: Exp a -> Exp b }
 
-prop_serialize_bidirectional :: HeapEntry -> Bool
-prop_serialize_bidirectional h = h == (deserialize . serialize) h
+data Interval = Interval { iLow :: Ptr, iHigh :: Ptr }
+newtype FreeList = FreeList { unFreeList :: [Interval] }
 
-type HeapPtr = Word16
-{-data Thread = Thread HeapPtr -- ^ The start of its free blocks list
-                     HeapPtr -- ^ The bottom of its stack
-                     HeapPtr -- ^ The top of its stack-}
-type Thread = Bool -- ^ is this the 1st thread or the 2nd
+data Thread m = Thread
+  -- this is NOT block structured!!!
+  { heapMem      :: MutableByteArray (PrimState m)
+  , heapRootSet :: [Ptr]
+  , freeList    :: FreeList
+  , entryPoint  :: Ptr
+  , codeMem     :: [AnyFunction]
+  }
 
---invariant for global free blocks list:
---
---  IOref of some integer
---  every number preceding it is filled
---
--- actually there will be no free blocks list for now.
-
--- each block is 1K
-
--- PSA suggestion on simple thing to start with
---
--- we have only two thread
--- each thread has its own blocks list
--- each thread "owns" half of memory
---
--- thread 1 can put whatever it wants inside 0x0000 to 0x7FFF
--- thread 2 can put whatever it wants inside 0x8000 to 0xFFFF
-
-
-type RTS m = StateT (Heap m) m
-
-runRTS :: Monad m => Heap m -> RTS m a -> m a
-runRTS = flip evalStateT
-
-{-runOneThread' :: forall s. RTS (ST s) ()
-runOneThread' = do
-  undefined
-
-runOneThread :: forall s. Heap (ST s) -> ST s ()
-runOneThread s = runRTS s runOneThread'
-
-main :: IO ()
-main = do
-  heap' <- newByteArray (8 * 0xFFFF)
-  let heap = Heap { heapMem = heap' }
-  forkIO $ runST $ runOneThread heap
-  forkIO $ runST $ runOneThread heap-}
-
-{-threadBase :: Thread -> HeapPtr
-threadBase False = 0x0000
-threadBase True  = 0x8000
-
-setupThread :: HeapPtr -> RTS IO ()
-setupThread threadBase = do
-  undefined-}
+type RTS m = StateT (Thread m) m
 
 fullHeap :: RTS IO Bool
 fullHeap = null . unFreeList <$> gets freeList
 
-splitLowestByte :: FreeList -> (HeapPtr, FreeList)
+splitLowestByte :: FreeList -> (Ptr, FreeList)
 splitLowestByte (FreeList f) = (el, FreeList new)
   where (Interval el eh:es) = sortBy (compare `on` iLow) $ f
         el' = el + 1
         new | el' == eh = es
             | otherwise = Interval el' eh:es
 
-alloc :: HeapEntry -> RTS IO ()
-alloc e = do
-  f <- fullHeap
-  if f then gcThisThread else do
-    h <- get
-    let (addr, f') = splitLowestByte (freeList h)
-    writeByteArray (heapMem h) (fromIntegral addr) (serialize e)
-    put h { freeList = f' }
+allocWord :: Monad m => RTS m Ptr
+allocWord = do
+  (p, f') <- splitLowestByte <$> gets freeList
+  modify (\h -> h { freeList = f' })
+  pure p
 
-gcThisThread :: RTS IO ()
-gcThisThread = undefined
+heapWrite :: PrimMonad m => Ptr -> Word32 -> RTS m ()
+heapWrite (Ptr addr) word =
+  gets heapMem >>= flip (flip writeByteArray (fromIntegral addr)) word
 
-runOneThread :: Bool -> RTS IO ()
-runOneThread t = do
-  undefined
+-- type tag in lowest 3 bits of the right sort of header thingy
+--
+-- int
+-- bool
+-- intrinsic: plus <-- needs some pointers
+-- intrinsic: mult <-- needs some pointers
+-- intrinsic: eq   <-- needs some pointers
+-- intrinsic: if   <-- needs some pointers
+-- function
+-- fixpoint
+-- application     <-- needs some pointers
+--
+-- here's an idea:
+--   000: int
+--   001: bool
+--   010: function
+--   100: fixpoint
+--   101: application
+--
+-- now there is an easy one bit test to decide whether or not there
+-- are any more pointers that we need to follow.
+--
+-- intrinsics are just the first few code pointers.
+encode :: PrimMonad m => Exp a -> Ptr -> RTS m ()
+encode (E_Int i) p = heapWrite p $ 0x0000000000000000 .|. fromIntegral i
 
-main :: IO ()
+-- 64 bits is 8 bytes = 16 hexits
+--serialize :: Exp a -> Word32
+--serialize (E_Int i) = 0x0000000000000000 .|. fromIntegral i
+--enacode :: Exp a -> RTS m ()
+
+{-unrelated to the above:
+
+data Foo = Foo { x :: Maybe Int, y :: Maybe Int, z :: [Int] } deriving (Show)
+
 main = do
-  heap' <- newByteArray (8 * 0xFFFF)
-  forkOS $ evalStateT (runOneThread False) $
-    Heap { heapMem = heap'
-         , heapRootSet = []
-         , freeList = FreeList [Interval 0x0001 0x7FFF ]
-         }
-  forkOS $ evalStateT (runOneThread True) $
-    Heap { heapMem = heap'
-         , heapRootSet = []
-         , freeList = FreeList [Interval 0x8001 0xFFFF ]
-         }
-  forever $ threadDelay 100000000000
-
-
--- other structures to consider:
---   rose tree of IORefs / Ptr Word32
-
-data Interval = Interval { iLow :: HeapPtr, iHigh :: HeapPtr }
-newtype FreeList = FreeList { unFreeList :: [Interval] }
-
-data Heap m = Heap
-  -- this is NOT block structured!!!
-  { heapMem      :: MutableByteArray (PrimState m)
-  , heapRootSet :: [HeapPtr]
-  , freeList    :: FreeList
-  -- , heapBounds :: (Int,Int)     -- array bounds
-  -- , heapFree :: Int             -- next free index
-  }
-
-{- data TypeTag = Pointer | Int
-
-
--- TODO: throw memory exhaustion exception
--- GC = catch exception, run gc, etc
-data Exn = OutOfMemory
-         | InvalidPtr -- if not tagged as a metadata field
-
-type RTS a = ExceptT Exn (StateT Heap IO) a
-
-withRawHeap :: (IOUArray Int Word32 -> IO a) -> RTS a
-withRawHeap f = gets heapMem >>= liftIO . f
-
-getAllocPtr :: RTS Int
-getAllocPtr = gets heapFree
-
-bumpAllocPtr :: Int -> RTS ()
-bumpAllocPtr i = void $ modify (\h -> h {heapFree = heapFree h + i})
-
-writeWords :: [Word32] -> RTS Int
-writeWords ws = do
-  i <- getAllocPtr
-  bumpAllocPtr (length ws)
-  withRawHeap $ \h -> zipWithM_ (writeArray h) [i..] ws
-  return i
-
--- given an int index, get its metadata
-getType :: Int -> RTS (Proxy x)
-getType i = do
-  meta <- withRawHeap $ \h -> readArray h i
-  checkIsMeta meta
-  return $ metaType meta
-
--- TODO
-checkIsMeta :: Word32 -> RTS ()
-checkIsMeta w = throwError InvalidPtr
-
-metaType :: Word32 -> Proxy x
-metaType = undefined
-
-
-alloc ::-}
-
--- -- | DATA REPRESENTATION
--- -- right now only consider primitive data that fit into a single word32.
--- -- heap looks like this:
--- --      [meta | data | meta | data ... ]
--- --
--- -- tagging: use LSB for tagging:
--- -- 0 for metadata
--- -- 1 for data
--- --
--- -- NB: as this gets fleshed out it will be time to switch to a better repr like
--- -- the GHC representation: https://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects
--- -- or the Scheme one: http://www.more-magic.net/posts/internals-data-representation.html
-
-
-
-
--- -- proxy for metadata serialisation
--- data Meta
-
--- -- representable data
--- newtype Var v a = Var v
-
--- data Value v a where
---   Fun :: (Var v a -> Value v b) -> Value v b
---   Let :: Var v a -> Value v a -> Value v b -> Value v b
---   Bool :: Bool -> Value v Bool
---   Int :: Int -> Value v Int
-
-
--- --  Int  :: Int -> Value
--- --  Chr  ::  -> Value
--- --  Bool :: Word32 -> Value
-
--- --  Meta :: Word32 -> Value (Proxy Meta)
--- --  Pair :: Value a -> Value b -> Value x
-
--- -- serialisation
--- class Repr x where
---   repr :: x -> [Word32]
-
---   meta :: x -> Word32
-
--- -- TODO
--- instance Repr (Value x) where
---   repr (Int i) = [0]
-
---   meta (Int i) = 0
-
--- serialise :: Repr a => a -> [Word32]
--- serialise x = meta x : repr x
-
--- {-@ reify :: {b:[Word32]| len b >= 2} -> Proxy x -> Value x @-}
--- reify :: [Word32] -> Proxy x -> Value x
--- reify (m:bs) _ = undefined
-
--- alloc :: Repr a => a -> GC a
--- alloc x = do
---   let r = meta x : repr x
---   return x
-
-
--- compile arbitrary haskell progs
--- class Embed a where
---   embed :: a -> Value
--- instance Embed Int where
---   embed i = Int i
--- instance Embed String where
---   embed s = Str s
--- instance Embed Bool where
---   embed b = Bool b
--- instance (Embed a, Embed b) => Embed (a,b) where
---   embed (a,b) = Pair (embed a) (embed b)
-
--- class CoEmbed a where
---   embedFun :: a -> (Value -> Value)
-
--- instance (Embed a, Embed b) => CoEmbed (a -> b) where
---   embedFun f = \x -> embed (f (unembed x))
-
--- instance (Embed a, CoEmbed b, b ~ (c -> d)) => CoEmbed (a -> b) where
---   embedFun f = \x -> embed (f (unembed x))
---     where
---       unembed :: Value -> a
---       unembed (Int i) = i
---       unembed (Str s) = s
---       unembed (Bool b) = b
-
-
--- gc semantics
-
-
-
-
--- main :: IO ()
--- main = do
---   return ()
+  let foo1 = Foo  { x = Nothing, y = Just 5, z = [1, 2, 3, 4, 8, 9] }
+  let foo2 = foo1 { x = Just 10 }
+  putStrLn $ show foo2
+-}
