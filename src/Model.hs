@@ -33,11 +33,11 @@ data Exp (a :: TermType) where
   E_Bool  :: Bool       -> Exp 'T_Bool
   E_Fun   :: (Exp a -> Exp b) -> Exp ('T_Fun a b)
 
-  E_Plus  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
-  E_Mult  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
-  E_Eq    :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Bool
+  -- E_Plus  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
+  -- E_Mult  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
+  -- E_Eq    :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Bool
   E_If    :: Exp 'T_Bool -> Exp a -> Exp a -> Exp a
-  E_Fix   :: Exp ('T_Fun a a) -> Exp a
+--  E_Fix   :: Exp ('T_Fun a a) -> Exp a
   E_App   :: Exp ('T_Fun a b) -> Exp a -> Exp b
 
 fact :: Exp ('T_Fun 'T_Int 'T_Int)
@@ -62,7 +62,7 @@ eval_hs (E_Bool b) = b
 -- eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
 -- eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
 -- eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
--- eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
+eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
 eval_hs (E_Fun f) = f
 --eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
 eval_hs (E_App f a) = eval_hs (eval_hs f a)
@@ -125,15 +125,15 @@ heapWrite (Ptr addr) word =
 -- are any more pointers that we need to follow.
 --
 -- intrinsics are just the first few code pointers.
-encode :: PrimMonad m => Exp a -> Ptr -> RTS m ()
-encode (E_Int i       ) p = heapWrite p $ shift (metadata 0b00) 32 .|. fromIntegral i
-encode (E_Bool  b     ) p = heapWrite p $ shift (metadata 0b01) 32 .|. fromIntegral b
-encode (E_Fun   f     ) p = heapWrite p $ shift (metadata 0b10) 32 .|. fromIntegral b
-encode (E_App   f e   ) p = do
+compile :: PrimMonad m => Exp a -> Ptr -> RTS m ()
+compile (E_Int i       ) p = heapWrite p $ shift (metadata 0b00) 32 .|. fromIntegral i
+compile (E_Bool  b     ) p = heapWrite p $ shift (metadata 0b01) 32 .|. fromIntegral b
+compile (E_Fun   f     ) p = heapWrite p $ shift (metadata 0b10) 32 .|. fromIntegral b
+compile (E_App   f e   ) p = do
   fp <- allocWord
   ep <- allocWord
-  encode f fp
-  encode e ep
+  compile f fp
+  compile e ep
   heapWrite p $  shift (metadata 0b11) 32
              .|. shift (fromIntegral (getPtr fp)) 16
              .|. fromIntegral (getPtr ep)
