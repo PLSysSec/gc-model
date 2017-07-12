@@ -1,3 +1,4 @@
+{-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -16,6 +17,7 @@ import Data.List
 import Data.Ord
 import Data.Function
 import Control.Monad.State
+import Control.Monad.Fix
 
 newtype Ptr = Ptr { getPtr :: Word16 } deriving (Num, Eq, Ord)
 
@@ -24,6 +26,7 @@ data TermType where
   T_Ptr  :: TermType
   T_Bool :: TermType
   T_Fun  :: TermType -> TermType -> TermType
+
 data Exp (a :: TermType) where
   E_Int   :: Int32      -> Exp 'T_Int
   E_Ptr   :: Word16     -> Exp 'T_Ptr
@@ -43,6 +46,9 @@ fact = E_Fix $ E_Fun $ \fact -> E_Fun $ \n ->
        (E_Int 1)
        (E_Mult (E_App fact (E_Plus n (E_Int (-1)))) n)
 
+
+--fact = \f n -> if n == 0 then 1 else n * (f (n-1))
+
 type family HSType (t :: TermType) :: Type where
   HSType T_Int       = Int32
   HSType T_Ptr       = Word16
@@ -53,12 +59,12 @@ eval_hs :: Exp t -> HSType t
 eval_hs (E_Int i)  = i
 eval_hs (E_Ptr p)  = p
 eval_hs (E_Bool b) = b
-eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
-eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
-eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
-eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
+-- eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
+-- eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
+-- eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
+-- eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
 eval_hs (E_Fun f) = f
-eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
+--eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
 eval_hs (E_App f a) = eval_hs (eval_hs f a)
 
 data AnyFunction = forall a b. AnyFunction { applyFunction :: Exp a -> Exp b }
@@ -68,7 +74,7 @@ newtype FreeList = FreeList { unFreeList :: [Interval] }
 
 data Thread m = Thread
   -- this is NOT block structured!!!
-  { heapMem      :: MutableByteArray (PrimState m)
+  { heapMem     :: MutableByteArray (PrimState m)
   , heapRootSet :: [Ptr]
   , freeList    :: FreeList
   , entryPoint  :: Ptr
@@ -110,18 +116,33 @@ heapWrite (Ptr addr) word =
 -- application     <-- needs some pointers
 --
 -- here's an idea:
---   000: int
---   001: bool
---   010: function
---   100: fixpoint
---   101: application
+--   00: int
+--   01: bool
+--   10: function
+--   11: application
 --
 -- now there is an easy one bit test to decide whether or not there
 -- are any more pointers that we need to follow.
 --
 -- intrinsics are just the first few code pointers.
 encode :: PrimMonad m => Exp a -> Ptr -> RTS m ()
-encode (E_Int i) p = heapWrite p $ 0x0000000000000000 .|. fromIntegral i
+encode (E_Int i       ) p = heapWrite p $ shift (metadata 0b00) 32 .|. fromIntegral i
+encode (E_Bool  b     ) p = heapWrite p $ shift (metadata 0b01) 32 .|. fromIntegral b
+encode (E_Fun   f     ) p = heapWrite p $ shift (metadata 0b10) 32 .|. fromIntegral b
+encode (E_App   f e   ) p = do
+  fp <- allocWord
+  ep <- allocWord
+  encode f fp
+  encode e ep
+  heapWrite p $  shift (metadata 0b11) 32
+             .|. shift (fromIntegral (getPtr fp)) 16
+             .|. fromIntegral (getPtr ep)
+
+metadata :: Word32 -> Word32
+metadata x = shift 1 x
+
+
+
 
 -- 64 bits is 8 bytes = 16 hexits
 --serialize :: Exp a -> Word32
