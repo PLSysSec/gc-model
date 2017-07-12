@@ -27,11 +27,14 @@ data TermType where
   T_Bool :: TermType
   T_Fun  :: TermType -> TermType -> TermType
 
+data Var (a :: TermType) where
+  Var :: String -> Var a
+
 data Exp (a :: TermType) where
   E_Int   :: Int32      -> Exp 'T_Int
   E_Ptr   :: Word16     -> Exp 'T_Ptr
   E_Bool  :: Bool       -> Exp 'T_Bool
-  E_Fun   :: (Exp a -> Exp b) -> Exp ('T_Fun a b)
+  E_Fun   :: Var a -> Exp b -> Exp ('T_Fun a b)
 
   -- E_Plus  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
   -- E_Mult  :: Exp 'T_Int -> Exp 'T_Int -> Exp 'T_Int
@@ -40,11 +43,11 @@ data Exp (a :: TermType) where
 --  E_Fix   :: Exp ('T_Fun a a) -> Exp a
   E_App   :: Exp ('T_Fun a b) -> Exp a -> Exp b
 
-fact :: Exp ('T_Fun 'T_Int 'T_Int)
-fact = E_Fix $ E_Fun $ \fact -> E_Fun $ \n ->
-  E_If (E_Eq n (E_Int 0))
-       (E_Int 1)
-       (E_Mult (E_App fact (E_Plus n (E_Int (-1)))) n)
+-- fact :: Exp ('T_Fun 'T_Int 'T_Int)
+-- fact = E_Fix $ E_Fun $ \fact -> E_Fun $ \n ->
+--   E_If (E_Eq n (E_Int 0))
+--        (E_Int 1)
+--        (E_Mult (E_App fact (E_Plus n (E_Int (-1)))) n)
 
 
 --fact = \f n -> if n == 0 then 1 else n * (f (n-1))
@@ -55,17 +58,17 @@ type family HSType (t :: TermType) :: Type where
   HSType T_Bool      = Bool
   HSType (T_Fun a b) = Exp a -> Exp b
 
-eval_hs :: Exp t -> HSType t
-eval_hs (E_Int i)  = i
-eval_hs (E_Ptr p)  = p
-eval_hs (E_Bool b) = b
--- eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
--- eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
--- eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
-eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
-eval_hs (E_Fun f) = f
---eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
-eval_hs (E_App f a) = eval_hs (eval_hs f a)
+-- eval_hs :: Exp t -> HSType t
+-- eval_hs (E_Int i)  = i
+-- eval_hs (E_Ptr p)  = p
+-- eval_hs (E_Bool b) = b
+-- -- eval_hs (E_Plus e1 e2) = eval_hs e1 + eval_hs e2
+-- -- eval_hs (E_Mult e1 e2) = eval_hs e1 * eval_hs e2
+-- -- eval_hs (E_Eq e1 e2) = eval_hs e1 == eval_hs e2
+-- eval_hs (E_If c t e) = if eval_hs c then eval_hs t else eval_hs e
+-- eval_hs (E_Fun f) = f
+-- --eval_hs (E_Fix f) = eval_hs (fix (eval_hs f))
+-- eval_hs (E_App f a) = eval_hs (eval_hs f a)
 
 data AnyFunction = forall a b. AnyFunction { applyFunction :: Exp a -> Exp b }
 
@@ -127,8 +130,9 @@ heapWrite (Ptr addr) word =
 -- intrinsics are just the first few code pointers.
 compile :: PrimMonad m => Exp a -> Ptr -> RTS m ()
 compile (E_Int i       ) p = heapWrite p $ shift (metadata 0b00) 32 .|. fromIntegral i
-compile (E_Bool  b     ) p = heapWrite p $ shift (metadata 0b01) 32 .|. fromIntegral b
-compile (E_Fun   f     ) p = heapWrite p $ shift (metadata 0b10) 32 .|. fromIntegral b
+compile (E_Bool  b     ) p = heapWrite p $ shift (metadata 0b01) 32 .|. fromIntegral (fromEnum b)
+-- TODO: code pointer
+--compile (E_Fun (Var b) f   ) p = heapWrite p $ shift (metadata 0b10) 32 .|. fromIntegral f
 compile (E_App   f e   ) p = do
   fp <- allocWord
   ep <- allocWord
@@ -139,7 +143,7 @@ compile (E_App   f e   ) p = do
              .|. fromIntegral (getPtr ep)
 
 metadata :: Word32 -> Word32
-metadata x = shift 1 x
+metadata x = shift x 1
 
 
 
